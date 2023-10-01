@@ -19,4 +19,4 @@ EXPOSE 34455
 # Define the command to run your app using gunicorn (a production-ready WSGI server)
 # You'll need to install gunicorn in your app
 RUN pip install gunicorn
-CMD ["gunicorn", "-b", "0.0.0.0:5000", "your_flask_app_filename:app"]
+CMD ["gunicorn", "-b", "0.0.0.0:34455", "main:app"]
