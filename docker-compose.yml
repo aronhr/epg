@@ -1,0 +1,10 @@
+version: "3.9"
+services:
+  epg:
+    container_name: epg
+    image: "ghcr.io/aronhr/epg:main"
+    restart: unless-stopped
+    volumes:
+      - ./docker-services/epg/logs:/app/logs
+    ports:
+      - 34455:34455
