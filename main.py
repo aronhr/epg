@@ -13,7 +13,7 @@ BASE_URL = os.environ.get("BASE_URL", "https://exposure.api.redbee.live")
 root = ET.Element("tv")
 
 # Set up logging
-logging.basicConfig(filename='app.log',
+logging.basicConfig(filename='logs/app.log',
                     level=logging.INFO,
                     encoding='utf-8',
                     format='%(asctime)s %(levelname)s %(name)s %(message)s')
