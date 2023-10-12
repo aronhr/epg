@@ -1,6 +1,6 @@
-# EPG Flask Application
+# EPG (Electronic Program Guide) for Icelandic television
 
-This application fetches EPG (Electronic Program Guide) data and serves it in real time. 
+This application fetches EPG (Electronic Program Guide) for Icelandic television.
 The application interacts with the Redbee API to obtain the data, processes it, and provides the data in a structured XML format.
 
 ## Features
