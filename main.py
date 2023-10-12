@@ -75,11 +75,20 @@ def create_channels(json_data):
     :return:
     """
     for channel_data in json_data['channels']:
-        channel = ET.SubElement(root, "channel", id=channel_data['channel']['slugs'][0])
+        channel_slug = channel_data['channel']['slugs'][0] if channel_data['channel']['slugs'] else None
+        if not channel_slug:
+            logging.warning("No slug found for a channel. Skipping.")
+            continue
+
+        channel = ET.SubElement(root, "channel", id=channel_slug)
         ET.SubElement(channel, "display-name").text = escape(channel_data['channel']['title'])
-        ET.SubElement(channel, "icon", src=channel_data['channel']['images'][0]['url'])
+
+        icon_url = channel_data['channel']['images'][0]['url'] if channel_data['channel']['images'] else None
+        if icon_url:
+            ET.SubElement(channel, "icon", src=icon_url)
+
         epg_url = get_epg_url(fetch_json_from_webservice(BASE_URL + channel_data['channel']['action']['internalUrl']))
-        create_programme_element(fetch_json_from_webservice(BASE_URL + epg_url), channel_data['channel']['slugs'][0])
+        create_programme_element(fetch_json_from_webservice(BASE_URL + epg_url), channel_slug)
     return ET.tostring(root, encoding='utf-8', method='xml').decode('utf-8')
 
 
@@ -91,7 +100,6 @@ def create_programme_element(channel_data, channel_slug):
     :return:
     """
     for program_data in channel_data['assets']:
-
         title, season, episode = get_episode_details(program_data['title'])
 
         program = ET.SubElement(root, "programme",
@@ -102,7 +110,10 @@ def create_programme_element(channel_data, channel_slug):
         ET.SubElement(program, "desc").text = escape(program_data['description'])
         ET.SubElement(program, "series-number").text = escape(season)
         ET.SubElement(program, "episode-number").text = escape(episode)
-        ET.SubElement(program, "icon", src=program_data['images'][0]['url'])
+
+        icon_url = program_data['images'][0]['url'] if program_data['images'] else None
+        if icon_url:
+            ET.SubElement(program, "icon", src=icon_url)
 
 
 def save_xml_to_file(xml_str, file_path):
