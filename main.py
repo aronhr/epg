@@ -13,7 +13,7 @@ import threading
 app = Flask(__name__)
 
 BASE_URL = os.getenv("BASE_URL", "https://exposure.api.redbee.live")
-EPG_FILE = pathlib.Path("epg.xml")
+EPG_FILE = pathlib.Path("/data/epg.xml")
 EPG_LOCK = threading.Lock()
 
 logging.basicConfig(filename='logs/app.log', level=logging.INFO,
