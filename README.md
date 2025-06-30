@@ -1,52 +1,106 @@
-# EPG (Electronic Program Guide) for Icelandic television
+# EPG (Electronic Program Guide) for Icelandic Television
 
-This application fetches EPG (Electronic Program Guide) for Icelandic television.
-The application interacts with the Redbee API to obtain the data, processes it, and provides the data in a structured XML format.
+This application fetches and serves an Electronic Program Guide (EPG) for Icelandic TV channels. It queries the Redbee **Exposure** API, converts the response to XMLTV‑compatible format, saves the XML to disk every hour at **XX:45 UTC**, and exposes it via a lightweight HTTP endpoint with millisecond latency.
+
+## 📌 What’s new in v1.1
+
+* **Background refresh with APScheduler** – the EPG is regenerated hourly at `:45` and written to `epg.xml`.
+* **Instant responses** – the `/epg` route now serves the cached file instead of generating on‑request.
+* **Shared volume** – the XML file is stored in `/data/epg.xml` so it survives container restarts.
+* **Production‑ready Gunicorn launch** with `--preload` and a single worker.
+
+---
 
 ## Features
 
-- Fetches EPG data in real-time.
-- Processes and structures the data into XML.
-- Serves the XML data over a web endpoint for easy consumption.
+* Hourly automatic fetch of EPG data
+* Converts data to XMLTV schema
+* Single HTTP endpoint (`/epg`) that returns XML instantly
+* Structured logging to `/app/logs`
+* Lightweight single‑container deployment (Flask + scheduler)
+
+---
 
 ## Prerequisites
 
-- [Docker](https://www.docker.com/get-started)
-- [Docker Compose](https://docs.docker.com/compose/install/)
+| Tool           | Minimum Version |
+|----------------|-----------------|
+| Docker         | 20.10           |
+| Docker Compose | 2.0             |
 
-## Setup & Running
+---
 
-1. **Pull the Docker Image from GitHub Container Registry**:
-    ```bash
-    docker pull ghcr.io/aronhr/epg:main
-    ```
+## Quick Start
 
-2. **Clone the Repository** (if you haven't already):
-    ```bash
-    git clone git@github.com:aronhr/epg.git
-    cd epg
-    ```
+```bash
+# 1. Pull the image
+docker pull ghcr.io/aronhr/epg:main
 
-3. **Build and Run with Docker Compose**:
-    ```bash
-    docker-compose up -d
-    ```
+# 2. Clone the repo (optional – only if you want to edit compose or code)
+git clone https://github.com/aronhr/epg.git
+cd epg
 
-4. **Access the Application**:
-   Once the Docker container is running, the application can be accessed at:
+# 3. Start the service
+docker compose up -d   # docker‑compose up -d works too
+```
 
-## API Endpoints
+### Folder layout created on the host
 
-- `/epg`: Fetch the EPG data in XML format.
+```
+docker-services/
+└─ epg/
+   ├─ logs/   # container logs
+   └─ epg.xml # epg.xml lives here
+```
 
-## Logging
+---
 
-Logs for the application are stored in the `./docker-services/epg/logs` directory on the host machine.
+## Configuration
+
+| Variable   | Default                            | Description                                            |
+| ---------- | ---------------------------------- | ------------------------------------------------------ |
+| `BASE_URL` | `https://exposure.api.redbee.live` | Base URL of Redbee Exposure API                        |
+| `TZ`       | `UTC`                              | Time‑zone inside the container (affects the scheduler) |
+
+Set environment variables under `environment:` in `docker-compose.yml`.
+
+---
+
+## API
+
+| Method | Path   | Description                                                       |
+| ------ | ------ | ----------------------------------------------------------------- |
+| `GET`  | `/epg` | Returns the latest `epg.xml` with `Content-Type: application/xml` |
+
+Example:
+
+```bash
+curl http://localhost:34455/epg > epg.xml
+```
+
+---
+
+## Logs
+
+All logs are written to `./docker-services/epg/logs/app.log` on the host.
+
+---
+
+## Updating the image
+
+```bash
+docker pull ghcr.io/aronhr/epg:main
+docker compose up -d
+```
+
+---
 
 ## Contributing
 
-If you wish to contribute to this project, please fork the repository and submit a pull request.
+Pull requests are welcome! Please open an issue first to discuss major changes.
+
+---
 
 ## License
 
-[MIT License](LICENSE)
+MIT
