@@ -1,152 +1,95 @@
-from flask import Flask, jsonify
-import requests
-import xml.etree.ElementTree as ET
+from flask import Flask, send_file, jsonify
+import requests, xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
-import logging
-import os
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+import logging, os, pathlib, threading
 
 app = Flask(__name__)
 
-# Fetch BASE_URL from environment variables
-BASE_URL = os.environ.get("BASE_URL", "https://exposure.api.redbee.live")
+BASE_URL = os.getenv("BASE_URL", "https://exposure.api.redbee.live")
+EPG_FILE  = pathlib.Path("epg.xml")        # deilt volume
+EPG_LOCK  = threading.Lock()                     # tryggir að les/rit skarist ekki
 
-root = ET.Element("tv")
-
-# Set up logging
-logging.basicConfig(filename='logs/app.log',
-                    level=logging.INFO,
-                    encoding='utf-8',
-                    format='%(asctime)s %(levelname)s %(name)s %(message)s')
-
+logging.basicConfig(filename='logs/app.log', level=logging.INFO,
+                    format='%(asctime)s %(levelname)s %(message)s', encoding='utf-8')
 
 def format_date(date):
-    """
-    Format the date to the correct format.
-    :param date:
-    :return:
-    """
     return date.replace(":", "").replace("-", "").replace("T", "").replace("Z", "") + " +0000"
 
+def fetch_json(url):
+    r = requests.get(url, timeout=20)
+    r.raise_for_status()
+    return r.json()
 
 def get_epg_url(data):
-    """
-    Get the EPG URL from the JSON data.
-    :param data:
-    :return:
-    """
-    for component in data['components']:
-        if component['id'] == f'generator-epg-{data["id"]}':
-            return component['internalUrl']
+    for c in data['components']:
+        if c['id'] == f'generator-epg-{data["id"]}':
+            return c['internalUrl']
 
+def build_epg():
+    root = ET.Element("tv")
+    url = (f"{BASE_URL}/api/internal/customer/Nova/businessunit/novatvprod/"
+           "component/63b00b6f-cf6d-4bbb-bca5-c5107029608d?deviceGroup=web")
+    outer = fetch_json(url)
 
-def fetch_json_from_webservice(url):
-    """
-    Fetch JSON data from a web service.
-    :param url:
-    :return:
-    """
-    response = requests.get(url)
-    response.raise_for_status()  # Raise HTTPError for bad responses
-    return response.json()
+    for ch in outer['channels']:
+        slug = ch['channel']['slugs'][0]
+        channel = ET.SubElement(root, "channel", id=slug)
+        ET.SubElement(channel, "display-name").text = escape(ch['channel']['title'])
+        if ch['channel']['images']:
+            ET.SubElement(channel, "icon", src=ch['channel']['images'][0]['url'])
 
+        epg_url = get_epg_url(fetch_json(BASE_URL + ch['channel']['action']['internalUrl']))
+        for show in fetch_json(BASE_URL + epg_url)['assets']:
+            title_parts = show['title'].split()
+            season = episode = ""
+            if len(title_parts) > 2 and title_parts[0].startswith("S") and title_parts[1].startswith("E"):
+                season, episode = title_parts[0][1:], title_parts[1][1:]
+                title = " ".join(title_parts[2:])
+            else:
+                title = show['title']
 
-def get_episode_details(title):
-    """
-    Get episode details from the JSON data.
-    If the title starts with S2 E20, then the episode is season 2, episode 20.
-    :param title: Episode or movie title
-    :return: tuple of the title, season and episode
-    """
-    title = title.strip()
-    season = ""
-    episode = ""
-    splitted_title = title.split(" ")
-    if len(splitted_title) > 2 and splitted_title[0].startswith("S") and splitted_title[1].startswith("E"):
-        season = splitted_title[0].replace("S", "")
-        episode = splitted_title[1].replace("E", "")
-        title = " ".join(splitted_title[2::])
-    return title, season, episode
+            p = ET.SubElement(root, "programme",
+                              start=format_date(show['startTime']),
+                              stop=format_date(show['endTime']),
+                              channel=slug)
+            ET.SubElement(p, "title").text = escape(title)
+            ET.SubElement(p, "desc").text  = escape(show['description'])
+            ET.SubElement(p, "series-number").text  = season
+            ET.SubElement(p, "episode-number").text = episode
+            if show['images']:
+                ET.SubElement(p, "icon", src=show['images'][0]['url'])
 
+    return ET.tostring(root, encoding='utf-8').decode('utf-8')
 
-def create_channels(json_data):
-    """
-    Create the channel elements.
-    :param json_data:
-    :return:
-    """
-    for channel_data in json_data['channels']:
-        channel_slug = channel_data['channel']['slugs'][0] if channel_data['channel']['slugs'] else None
-        if not channel_slug:
-            logging.warning("No slug found for a channel. Skipping.")
-            continue
-
-        channel = ET.SubElement(root, "channel", id=channel_slug)
-        ET.SubElement(channel, "display-name").text = escape(channel_data['channel']['title'])
-
-        icon_url = channel_data['channel']['images'][0]['url'] if channel_data['channel']['images'] else None
-        if icon_url:
-            ET.SubElement(channel, "icon", src=icon_url)
-
-        epg_url = get_epg_url(fetch_json_from_webservice(BASE_URL + channel_data['channel']['action']['internalUrl']))
-        create_programme_element(fetch_json_from_webservice(BASE_URL + epg_url), channel_slug)
-    return ET.tostring(root, encoding='utf-8', method='xml').decode('utf-8')
-
-
-def create_programme_element(channel_data, channel_slug):
-    """
-    Create the programme elements.
-    :param channel_data:
-    :param channel_slug:
-    :return:
-    """
-    for program_data in channel_data['assets']:
-        title, season, episode = get_episode_details(program_data['title'])
-
-        program = ET.SubElement(root, "programme",
-                                start=format_date(program_data['startTime']),
-                                stop=format_date(program_data['endTime']),
-                                channel=channel_slug)
-        ET.SubElement(program, "title").text = escape(title)
-        ET.SubElement(program, "desc").text = escape(program_data['description'])
-        ET.SubElement(program, "series-number").text = escape(season)
-        ET.SubElement(program, "episode-number").text = escape(episode)
-
-        icon_url = program_data['images'][0]['url'] if program_data['images'] else None
-        if icon_url:
-            ET.SubElement(program, "icon", src=icon_url)
-
-
-def save_xml_to_file(xml_str, file_path):
-    """
-    Save the XML data to a file.
-    :param xml_str: The XML data as a string.
-    :param file_path: The path where to save the XML file.
-    :return:
-    """
-    with open(file_path, 'w', encoding='utf-8') as f:
-        f.write(xml_str)
-
-
-@app.route('/epg', methods=['GET'])
-def get_epg_data():
+def generate_and_store():
     try:
-        url = f"{BASE_URL}/api/internal/customer/Nova/businessunit/novatvprod/component/63b00b6f-cf6d-4bbb-bca5-c5107029608d?deviceGroup=web"
-        json_data = fetch_json_from_webservice(url)
-        xml_str = create_channels(json_data)
-
-        # Return XML as response
-        return xml_str, 200, {'Content-Type': 'application/xml'}
-    except requests.RequestException as e:
-        logging.error(f"Error fetching data from web service: {e}")
-        return jsonify({"error": "Failed to fetch data from web service"}), 500
-    except ET.ParseError as e:
-        logging.error(f"Error parsing XML: {e}")
-        return jsonify({"error": "Failed to parse XML data"}), 500
+        xml = build_epg()
+        with EPG_LOCK:
+            EPG_FILE.write_text(xml, encoding='utf-8')
+        logging.info("EPG refreshed and stored.")
     except Exception as e:
-        logging.error(f"Unexpected error: {e}")
-        return jsonify({"error": "An unexpected error occurred"}), 500
+        logging.exception("EPG refresh failed: %s", e)
 
+# ---------- Scheduler ----------
+scheduler = BackgroundScheduler(timezone="UTC")
+scheduler.add_job(generate_and_store, CronTrigger(minute=45))  # XX:45 hvers klukkutíma
+scheduler.start()
+
+# Frum keyrslan svo skráin sé til strax við ræsingu
+print("Generating EPG for the first time...")
+generate_and_store()
+
+# ---------- API ----------
+@app.route('/epg', methods=['GET'])
+def epg():
+    try:
+        with EPG_LOCK:
+            return send_file(EPG_FILE, mimetype='application/xml')
+    except FileNotFoundError:
+        return jsonify({"error": "EPG not yet generated"}), 503
 
 if __name__ == "__main__":
-    app.run(port=34455)
-
+    # Í dev-umhverfi (ekki production gunicorn) – gott í quick-testing
+    app.run(host="0.0.0.0", port=34455)
