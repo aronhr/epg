@@ -3,6 +3,7 @@ import requests, xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from datetime import datetime
 import logging, os, pathlib, threading
 
 app = Flask(__name__)
@@ -74,12 +75,12 @@ def generate_and_store():
 
 # ---------- Scheduler ----------
 scheduler = BackgroundScheduler(timezone="UTC")
-scheduler.add_job(generate_and_store, CronTrigger(minute=45))  # XX:45 hvers klukkutíma
-scheduler.start()
+scheduler.add_job(generate_and_store, CronTrigger(minute=45))
 
-# Frum keyrslan svo skráin sé til strax við ræsingu
-print("Generating EPG for the first time...")
-generate_and_store()
+# Fire one *as soon as the scheduler starts*, en í sínu eigin threadi
+scheduler.add_job(generate_and_store, trigger='date', next_run_time=datetime.utcnow())
+
+scheduler.start()
 
 # ---------- API ----------
 @app.route('/epg', methods=['GET'])
