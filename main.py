@@ -1,125 +1,154 @@
-from datetime import datetime, timezone, timedelta
-from flask import Flask, send_file, jsonify
-import requests
-import xml.etree.ElementTree as ET
-from xml.sax.saxutils import escape
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
+from __future__ import annotations
+
 import logging
 import os
 import pathlib
 import threading
+from datetime import datetime, timezone
+from typing import Any, Dict, List
 
-app = Flask(__name__)
+import requests
+import xml.etree.ElementTree as ET
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+from flask import Flask, jsonify, send_file
+from xml.sax.saxutils import escape
+
+# ----------------------------------------------------------------------------
+# Configuration & globals
+# ----------------------------------------------------------------------------
 
 BASE_URL = os.getenv("BASE_URL", "https://exposure.api.redbee.live")
-EPG_FILE = pathlib.Path("/data/epg.xml")
-EPG_LOCK = threading.Lock()
+EPG_FILE = pathlib.Path("/data/epg.xml")        # must live in a write‑able volume
+LOG_FILE = pathlib.Path("logs/app.log")
 
-logging.basicConfig(filename='logs/app.log', level=logging.INFO,
-                    format='%(asctime)s %(levelname)s %(message)s', encoding='utf-8')
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    encoding="utf-8",
+)
+logger = logging.getLogger("epg")
 
-# 48‑hour window ────────────────────────────────────────────────────────────────
-WINDOW_HOURS = 48
+app = Flask(__name__)
+_lock = threading.Lock()
+
+# ----------------------------------------------------------------------------
+# Helper functions
+# ----------------------------------------------------------------------------
+
+def format_date(iso_str: str) -> str:
+    """Convert ISO‑8601 → XMLTV datetime (YYYYMMDDHHMMSS +0000)."""
+    return (
+        iso_str.replace(":", "").replace("-", "").replace("T", "").replace("Z", "")
+        + " +0000"
+    )
 
 
-def format_date(date_str: str) -> str:
-    """Return XMLTV date format (yyyyMMddHHmmss +0000)."""
-    return date_str.replace(":", "").replace("-", "").replace("T", "").replace("Z", "") + " +0000"
-
-
-def parse_iso(date_str: str) -> datetime:
-    """Parse ISO‑8601 string with Z → aware datetime(UTC)."""
-    return datetime.fromisoformat(date_str.replace('Z', '+00:00')).astimezone(timezone.utc)
-
-
-def fetch_json(url: str):
-    r = requests.get(url, timeout=20)
+def fetch_json(url: str) -> Dict[str, Any]:
+    r = requests.get(url, timeout=30)
     r.raise_for_status()
     return r.json()
 
 
-def get_epg_url(data: dict):
-    for comp in data['components']:
-        if comp['id'] == f"generator-epg-{data['id']}":
-            return comp['internalUrl']
+def get_epg_url(comp_data: Dict[str, Any]) -> str | None:
+    """Return the internal EPG URL from a component JSON blob."""
+    for comp in comp_data.get("components", []):
+        if comp.get("id") == f"generator-epg-{comp_data['id']}":
+            return comp.get("internalUrl")
+    return None
 
 
-def build_epg():
+def build_epg() -> str:
+    """Build XMLTV from Redbee API (no date cutoff)."""
+
     root = ET.Element("tv")
-    cutoff = datetime.now(timezone.utc) + timedelta(hours=WINDOW_HOURS)
 
-    top_url = (f"{BASE_URL}/api/internal/customer/Nova/businessunit/novatvprod/"
-               "component/63b00b6f-cf6d-4bbb-bca5-c5107029608d?deviceGroup=web")
-    outer = fetch_json(top_url)
+    # Top‑level component listing all channels
+    listing_url = (
+        f"{BASE_URL}/api/internal/customer/Nova/businessunit/novatvprod/"
+        "component/63b00b6f-cf6d-4bbb-bca5-c5107029608d?deviceGroup=web"
+    )
+    outer = fetch_json(listing_url)
 
-    for ch in outer['channels']:
-        slug = ch['channel']['slugs'][0]
-        channel_el = ET.SubElement(root, "channel", id=slug)
-        ET.SubElement(channel_el, "display-name").text = escape(ch['channel']['title'])
-        if ch['channel']['images']:
-            ET.SubElement(channel_el, "icon", src=ch['channel']['images'][0]['url'])
+    for ch in outer.get("channels", []):
+        ch_info = ch["channel"]
+        slug = ch_info["slugs"][0]
+        title = ch_info["title"]
 
-        epg_url = get_epg_url(fetch_json(BASE_URL + ch['channel']['action']['internalUrl']))
-        assets = fetch_json(BASE_URL + epg_url)['assets']
-        _add_programmes(root, assets, slug, cutoff)
+        ch_el = ET.SubElement(root, "channel", id=slug)
+        ET.SubElement(ch_el, "display-name").text = escape(title)
+        if ch_info.get("images"):
+            ET.SubElement(ch_el, "icon", src=ch_info["images"][0]["url"])
 
-    return ET.tostring(root, encoding='utf-8').decode('utf-8')
+        # Fetch channel‑specific EPG JSON
+        comp_url = BASE_URL + ch_info["action"]["internalUrl"]
+        epg_url = get_epg_url(fetch_json(comp_url))
+        if not epg_url:
+            logger.warning("No EPG URL for channel %s", slug)
+            continue
 
+        for asset in fetch_json(BASE_URL + epg_url).get("assets", []):
+            title, season, episode = _parse_title(asset["title"])
 
-def _add_programmes(root: ET.Element, programmes: list, channel_slug: str, cutoff: datetime):
-    for pr in programmes:
-        start_dt = parse_iso(pr['startTime'])
-        if start_dt > cutoff:
-            continue  # beyond 48 h window → skip
+            prog = ET.SubElement(
+                root,
+                "programme",
+                start=format_date(asset["startTime"]),
+                stop=format_date(asset["endTime"]),
+                channel=slug,
+            )
+            ET.SubElement(prog, "title").text = escape(title)
+            ET.SubElement(prog, "desc").text = escape(asset["description"])
+            ET.SubElement(prog, "series-number").text = season
+            ET.SubElement(prog, "episode-number").text = episode
+            if asset.get("images"):
+                ET.SubElement(prog, "icon", src=asset["images"][0]["url"])
 
-        title_parts = pr['title'].split()
-        season = episode = ""
-        if len(title_parts) > 2 and title_parts[0].startswith('S') and title_parts[1].startswith('E'):
-            season, episode = title_parts[0][1:], title_parts[1][1:]
-            title = " ".join(title_parts[2:])
-        else:
-            title = pr['title']
-
-        prog_el = ET.SubElement(root, "programme",
-                                start=format_date(pr['startTime']),
-                                stop=format_date(pr['endTime']),
-                                channel=channel_slug)
-        ET.SubElement(prog_el, "title").text = escape(title)
-        ET.SubElement(prog_el, "desc").text = escape(pr['description'])
-        ET.SubElement(prog_el, "series-number").text = season
-        ET.SubElement(prog_el, "episode-number").text = episode
-        if pr['images']:
-            ET.SubElement(prog_el, "icon", src=pr['images'][0]['url'])
+    return ET.tostring(root, encoding="utf-8").decode("utf-8")
 
 
-def generate_and_store():
+def _parse_title(raw: str) -> tuple[str, str, str]:
+    """Extract title, season (Sxx) and episode (Exx) if present."""
+    parts = raw.strip().split()
+    if len(parts) > 2 and parts[0].startswith("S") and parts[1].startswith("E"):
+        return " ".join(parts[2:]), parts[0][1:], parts[1][1:]
+    return raw.strip(), "", ""
+
+
+# ----------------------------------------------------------------------------
+# Scheduler job – runs in the background thread pool
+# ----------------------------------------------------------------------------
+
+def generate_and_store() -> None:
     try:
+        logger.info("Refreshing full EPG …")
         xml = build_epg()
-        with EPG_LOCK:
-            EPG_FILE.write_text(xml, encoding='utf-8')
-        logging.info("EPG refreshed (next 48h) and stored.")
-    except Exception as exc:
-        logging.exception("EPG refresh failed: %s", exc)
+        with _lock:
+            EPG_FILE.write_text(xml, encoding="utf-8")
+        logger.info("EPG written to %s (%.1f KB)", EPG_FILE, EPG_FILE.stat().st_size / 1024)
+    except Exception:  # noqa: BLE001
+        logger.exception("EPG refresh failed")
 
 
-# ─────────────────────────── Scheduler ─────────────────────────────────────────
 scheduler = BackgroundScheduler(timezone="UTC")
-# Hourly at XX:45
-scheduler.add_job(generate_and_store, CronTrigger(minute=45))
-# One‑shot immediate run in background thread
-scheduler.add_job(generate_and_store, trigger='date', next_run_time=datetime.utcnow())
+scheduler.add_job(generate_and_store, CronTrigger(minute=45))  # XX:45 hourly
+# Fire first run immediately in its own thread
+scheduler.add_job(generate_and_store, trigger="date", next_run_time=datetime.utcnow())
 scheduler.start()
 
+# ----------------------------------------------------------------------------
+# Flask route
+# ----------------------------------------------------------------------------
 
-@app.route('/epg', methods=['GET'])
-def epg():
-    try:
-        with EPG_LOCK:
-            return send_file(EPG_FILE, mimetype='application/xml')
-    except FileNotFoundError:
-        return jsonify({"error": "EPG not yet generated"}), 503
+@app.route("/epg", methods=["GET"])
+def epg_endpoint():
+    with _lock:
+        if not EPG_FILE.exists():
+            return jsonify({"error": "EPG not yet generated"}), 503
+        return send_file(EPG_FILE, mimetype="application/xml")
 
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=34455)
+if __name__ == "__main__":
+    # Development only – in production run via gunicorn
+    app.run(host="0.0.0.0", port=34455)
