@@ -23,6 +23,11 @@ SYN_API_URL = os.getenv("SYN_API_URL", "https://www.syn.is/api/epg")
 EPG_FILE = pathlib.Path("data/epg.xml")        # must live in a write‑able volume
 LOG_FILE = pathlib.Path("logs/app.log")
 
+# Ensure directories exist
+EPG_FILE.parent.mkdir(parents=True, exist_ok=True)
+LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+# Configure logging
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.INFO,

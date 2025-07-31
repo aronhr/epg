@@ -1,3 +1,5 @@
 logs/app.log
+data/epg.xml
 .idea
 *.log
+__pycache__
