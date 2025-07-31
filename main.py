@@ -4,7 +4,7 @@ import logging
 import os
 import pathlib
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List
 
 import requests
@@ -19,7 +19,8 @@ from xml.sax.saxutils import escape
 # ----------------------------------------------------------------------------
 
 BASE_URL = os.getenv("BASE_URL", "https://exposure.api.redbee.live")
-EPG_FILE = pathlib.Path("/data/epg.xml")        # must live in a write‑able volume
+SYN_API_URL = os.getenv("SYN_API_URL", "https://www.syn.is/api/epg")
+EPG_FILE = pathlib.Path("epg.xml")        # must live in a write‑able volume
 LOG_FILE = pathlib.Path("logs/app.log")
 
 logging.basicConfig(
@@ -60,51 +61,166 @@ def get_epg_url(comp_data: Dict[str, Any]) -> str | None:
 
 
 def build_epg() -> str:
-    """Build XMLTV from Redbee API (no date cutoff)."""
+    """Build XMLTV from Redbee API and syn.is API (merged data)."""
 
     root = ET.Element("tv")
+    channels_data = {}  # Store channel info and programmes
 
-    # Top‑level component listing all channels
-    listing_url = (
-        f"{BASE_URL}/api/internal/customer/Nova/businessunit/novatvprod/"
-        "component/63b00b6f-cf6d-4bbb-bca5-c5107029608d?deviceGroup=web"
-    )
-    outer = fetch_json(listing_url)
+    # First, get data from Redbee API
+    logger.info("Fetching EPG data from Redbee API...")
+    try:
+        listing_url = (
+            f"{BASE_URL}/api/internal/customer/Nova/businessunit/novatvprod/"
+            "component/63b00b6f-cf6d-4bbb-bca5-c5107029608d?deviceGroup=web"
+        )
+        outer = fetch_json(listing_url)
 
-    for ch in outer.get("channels", []):
-        ch_info = ch["channel"]
-        slug = ch_info["slugs"][0]
-        title = ch_info["title"]
+        for ch in outer.get("channels", []):
+            ch_info = ch["channel"]
+            slug = ch_info["slugs"][0]
+            title = ch_info["title"]
 
-        ch_el = ET.SubElement(root, "channel", id=slug)
-        ET.SubElement(ch_el, "display-name").text = escape(title)
-        if ch_info.get("images"):
-            ET.SubElement(ch_el, "icon", src=ch_info["images"][0]["url"])
+            # Store channel info
+            channels_data[slug] = {
+                "title": title,
+                "images": ch_info.get("images", []),
+                "programmes": []
+            }
 
-        # Fetch channel‑specific EPG JSON
-        comp_url = BASE_URL + ch_info["action"]["internalUrl"]
-        epg_url = get_epg_url(fetch_json(comp_url))
-        if not epg_url:
-            logger.warning("No EPG URL for channel %s", slug)
-            continue
+            # Fetch channel‑specific EPG JSON
+            comp_url = BASE_URL + ch_info["action"]["internalUrl"]
+            epg_url = get_epg_url(fetch_json(comp_url))
+            if not epg_url:
+                logger.warning("No EPG URL for channel %s", slug)
+                continue
 
-        for asset in fetch_json(BASE_URL + epg_url).get("assets", []):
-            title, season, episode = _parse_title(asset["title"])
+            for asset in fetch_json(BASE_URL + epg_url).get("assets", []):
+                title_parsed, season, episode = _parse_title(asset["title"])
 
+                programme = {
+                    "start": format_date(asset["startTime"]),
+                    "stop": format_date(asset["endTime"]),
+                    "title": title_parsed,
+                    "desc": asset["description"],
+                    "season": season,
+                    "episode": episode,
+                    "images": asset.get("images", []),
+                    "source": "redbee"
+                }
+                channels_data[slug]["programmes"].append(programme)
+
+        logger.info("Fetched data for %d channels from Redbee API", len(channels_data))
+    except Exception as e:
+        logger.warning("Failed to fetch from Redbee API: %s", e)
+
+    # Second, enhance with data from syn.is API
+    logger.info("Fetching EPG data from syn.is API...")
+    try:
+        syn_channels = fetch_syn_channels()
+        
+        # Get data for today and next few days
+        today = datetime.now(timezone.utc)
+        dates_to_fetch = []
+        for i in range(7):  # Fetch 7 days of data
+            date = (today + timedelta(days=i)).strftime('%Y-%m-%d')
+            dates_to_fetch.append(date)
+
+        for slug in syn_channels:
+            for date in dates_to_fetch:
+                syn_programmes = fetch_syn_epg(slug, date)
+                
+                for prog_data in syn_programmes:
+                    # Map syn.is channel slug to our channel structure
+                    channel_slug = prog_data.get("midill", slug).lower()
+                    
+                    # If this is a new channel, create it
+                    if channel_slug not in channels_data:
+                        channels_data[channel_slug] = {
+                            "title": prog_data.get("midill_heiti", channel_slug),
+                            "images": [],
+                            "programmes": []
+                        }
+
+                    # Calculate end time from start time and duration
+                    start_time = prog_data["upphaf"]
+                    end_time = calculate_end_time(start_time, prog_data.get("slotlengd", "01:00"))
+
+                    # Create programme entry
+                    programme = {
+                        "start": format_syn_date(start_time),
+                        "stop": format_syn_date(end_time),
+                        "title": prog_data.get("isltitill") or prog_data.get("titill", ""),
+                        "desc": prog_data.get("lysing", ""),
+                        "season": str(prog_data.get("seria", "")),
+                        "episode": str(prog_data.get("thattur", "")),
+                        "images": [],
+                        "source": "syn",
+                        "category": prog_data.get("flokkur", ""),
+                        "live": bool(prog_data.get("beint", 0)),
+                        "premiere": bool(prog_data.get("frumsyning", 0))
+                    }
+
+                    # Check if we already have this programme from Redbee (avoid duplicates)
+                    existing = False
+                    for existing_prog in channels_data[channel_slug]["programmes"]:
+                        if (existing_prog["start"] == programme["start"] and 
+                            existing_prog["title"].lower() == programme["title"].lower()):
+                            # Enhance existing programme with syn.is data
+                            if not existing_prog.get("category") and programme["category"]:
+                                existing_prog["category"] = programme["category"]
+                            if not existing_prog.get("live"):
+                                existing_prog["live"] = programme["live"]
+                            if not existing_prog.get("premiere"):
+                                existing_prog["premiere"] = programme["premiere"]
+                            existing = True
+                            break
+                    
+                    if not existing:
+                        channels_data[channel_slug]["programmes"].append(programme)
+
+        logger.info("Enhanced/added data from syn.is API")
+    except Exception as e:
+        logger.warning("Failed to fetch from syn.is API: %s", e)
+
+    # Build XML from merged data
+    for channel_slug, channel_info in channels_data.items():
+        ch_el = ET.SubElement(root, "channel", id=channel_slug)
+        ET.SubElement(ch_el, "display-name").text = escape(channel_info["title"])
+        if channel_info["images"]:
+            ET.SubElement(ch_el, "icon", src=channel_info["images"][0]["url"])
+
+        # Sort programmes by start time
+        sorted_programmes = sorted(channel_info["programmes"], 
+                                 key=lambda x: x["start"])
+
+        for programme in sorted_programmes:
             prog = ET.SubElement(
                 root,
                 "programme",
-                start=format_date(asset["startTime"]),
-                stop=format_date(asset["endTime"]),
-                channel=slug,
+                start=programme["start"],
+                stop=programme["stop"],
+                channel=channel_slug,
             )
-            ET.SubElement(prog, "title").text = escape(title)
-            ET.SubElement(prog, "desc").text = escape(asset["description"])
-            ET.SubElement(prog, "series-number").text = season
-            ET.SubElement(prog, "episode-number").text = episode
-            if asset.get("images"):
-                ET.SubElement(prog, "icon", src=asset["images"][0]["url"])
+            ET.SubElement(prog, "title").text = escape(programme["title"])
+            ET.SubElement(prog, "desc").text = escape(programme["desc"])
+            
+            if programme["season"]:
+                ET.SubElement(prog, "series-number").text = programme["season"]
+            if programme["episode"]:
+                ET.SubElement(prog, "episode-number").text = programme["episode"]
+            
+            if programme["images"]:
+                ET.SubElement(prog, "icon", src=programme["images"][0]["url"])
+            
+            # Add syn.is specific data
+            if programme.get("category"):
+                ET.SubElement(prog, "category").text = escape(programme["category"])
+            if programme.get("live"):
+                ET.SubElement(prog, "live")
+            if programme.get("premiere"):
+                ET.SubElement(prog, "premiere")
 
+    logger.info("Built EPG with %d channels and programmes", len(channels_data))
     return ET.tostring(root, encoding="utf-8").decode("utf-8")
 
 
@@ -114,6 +230,59 @@ def _parse_title(raw: str) -> tuple[str, str, str]:
     if len(parts) > 2 and parts[0].startswith("S") and parts[1].startswith("E"):
         return " ".join(parts[2:]), parts[0][1:], parts[1][1:]
     return raw.strip(), "", ""
+
+
+def fetch_syn_channels() -> List[str]:
+    """Fetch list of channel slugs from syn.is API."""
+    try:
+        response = requests.get(SYN_API_URL, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.warning("Failed to fetch syn.is channels: %s", e)
+        return []
+
+
+def fetch_syn_epg(slug: str, date: str) -> List[Dict[str, Any]]:
+    """Fetch EPG data for a specific channel and date from syn.is API."""
+    try:
+        url = f"{SYN_API_URL}/{slug}/{date}"
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.warning("Failed to fetch syn.is EPG for %s on %s: %s", slug, date, e)
+        return []
+
+
+def format_syn_date(iso_str: str) -> str:
+    """Convert syn.is ISO‑8601 → XMLTV datetime (YYYYMMDDHHMMSS +0000)."""
+    # syn.is returns ISO format like "2025-07-31T18:30:00Z"
+    return format_date(iso_str)
+
+
+def calculate_end_time(start_time: str, duration_str: str) -> str:
+    """Calculate end time from start time and duration string (HH:MM format)."""
+    try:
+        # Parse start time
+        start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+        
+        # Parse duration (format: "HH:MM")
+        duration_parts = duration_str.split(':')
+        hours = int(duration_parts[0])
+        minutes = int(duration_parts[1])
+        
+        # Calculate end time
+        end_dt = start_dt + timedelta(hours=hours, minutes=minutes)
+        
+        # Convert back to ISO format with Z
+        return end_dt.strftime('%Y-%m-%dT%H:%M:%S') + 'Z'
+    except Exception as e:
+        logger.warning("Failed to calculate end time: %s", e)
+        # Fallback: add 1 hour to start time
+        start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+        end_dt = start_dt + timedelta(hours=1)
+        return end_dt.strftime('%Y-%m-%dT%H:%M:%S') + 'Z'
 
 
 # ----------------------------------------------------------------------------
