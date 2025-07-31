@@ -9,17 +9,7 @@ from typing import Any, Dict, List
 
 import requests
 import xml.etree.ElementTree as ET
-from apscheduler.schedulers.background import Bacdef generate_and_store() -> None:
-    try:
-        logger.info("Refreshing full EPG …")
-        xml = build_epg()
-        with _lock:
-            # Ensure the directory exists before writing the file
-            EPG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            EPG_FILE.write_text(xml, encoding="utf-8")
-        logger.info("EPG written to %s (%.1f KB)", EPG_FILE, EPG_FILE.stat().st_size / 1024)
-    except Exception:  # noqa: BLE001
-        logger.exception("EPG refresh failed")heduler
+from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, jsonify, send_file
 from xml.sax.saxutils import escape
