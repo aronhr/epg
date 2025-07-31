@@ -131,20 +131,30 @@ def build_epg() -> str:
             dates_to_fetch.append(date)
 
         for slug in syn_channels:
+            # Normalize the slug by removing hyphens
+            normalized_slug = slug.lower().replace("-", "")
+            
+            # Ensure channel exists even if no programmes are found
+            if normalized_slug not in channels_data:
+                channels_data[normalized_slug] = {
+                    "title": slug.upper(),  # Use the original slug as title if no better name is found
+                    "images": [],
+                    "programmes": []
+                }
+            
+            has_programmes = False
+            
             for date in dates_to_fetch:
                 syn_programmes = fetch_syn_epg(slug, date)
                 
                 for prog_data in syn_programmes:
+                    has_programmes = True
                     # Map syn.is channel slug to our channel structure (normalize by removing hyphens)
                     channel_slug = prog_data.get("midill", slug).lower().replace("-", "")
                     
-                    # If this is a new channel, create it
-                    if channel_slug not in channels_data:
-                        channels_data[channel_slug] = {
-                            "title": prog_data.get("midill_heiti", channel_slug),
-                            "images": [],
-                            "programmes": []
-                        }
+                    # Update channel title if we have better information
+                    if prog_data.get("midill_heiti"):
+                        channels_data[channel_slug]["title"] = prog_data.get("midill_heiti")
 
                     # Calculate end time from start time and duration
                     start_time = prog_data["upphaf"]
@@ -182,6 +192,24 @@ def build_epg() -> str:
                     
                     if not existing:
                         channels_data[channel_slug]["programmes"].append(programme)
+            
+            # If no programmes were found for this channel, create a placeholder
+            if not has_programmes and not channels_data[normalized_slug]["programmes"]:
+                now = datetime.now(timezone.utc)
+                placeholder_programme = {
+                    "start": format_date(now.isoformat() + 'Z'),
+                    "stop": format_date((now + timedelta(hours=24)).isoformat() + 'Z'),
+                    "title": "No programming information available",
+                    "desc": "No programme schedule is currently available for this channel.",
+                    "season": "",
+                    "episode": "",
+                    "images": [],
+                    "source": "placeholder",
+                    "category": "Information",
+                    "live": False,
+                    "premiere": False
+                }
+                channels_data[normalized_slug]["programmes"].append(placeholder_programme)
 
         logger.info("Enhanced/added data from syn.is API")
     except Exception as e:
