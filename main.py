@@ -20,7 +20,7 @@ from xml.sax.saxutils import escape
 
 BASE_URL = os.getenv("BASE_URL", "https://exposure.api.redbee.live")
 SYN_API_URL = os.getenv("SYN_API_URL", "https://www.syn.is/api/epg")
-EPG_FILE = pathlib.Path("epg.xml")        # must live in a write‑able volume
+EPG_FILE = pathlib.Path("data/epg.xml")        # must live in a write‑able volume
 LOG_FILE = pathlib.Path("logs/app.log")
 
 logging.basicConfig(
