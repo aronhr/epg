@@ -82,7 +82,7 @@ def build_epg() -> str:
 
         for ch in outer.get("channels", []):
             ch_info = ch["channel"]
-            slug = ch_info["slugs"][0]
+            slug = ch_info["slugs"][0].replace("-", "")  # Remove hyphens for better matching
             title = ch_info["title"]
 
             # Store channel info
@@ -135,8 +135,8 @@ def build_epg() -> str:
                 syn_programmes = fetch_syn_epg(slug, date)
                 
                 for prog_data in syn_programmes:
-                    # Map syn.is channel slug to our channel structure
-                    channel_slug = prog_data.get("midill", slug).lower()
+                    # Map syn.is channel slug to our channel structure (normalize by removing hyphens)
+                    channel_slug = prog_data.get("midill", slug).lower().replace("-", "")
                     
                     # If this is a new channel, create it
                     if channel_slug not in channels_data:
