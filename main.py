@@ -151,6 +151,11 @@ def build_epg() -> str:
             dates_to_fetch.append(date)
 
         for slug in syn_channels:
+            # Skip channels we don't want to process
+            if slug.lower() in ["beint", "bio"]:
+                logger.info("Skipping channel: %s", slug)
+                continue
+                
             # Normalize the slug by removing hyphens and applying mappings
             normalized_slug = normalize_channel_slug(slug, "syn")
             
@@ -165,9 +170,11 @@ def build_epg() -> str:
             has_programmes = False
             
             for date in dates_to_fetch:
+                logger.info("Fetching syn.is EPG for channel %s on %s", slug, date)
                 syn_programmes = fetch_syn_epg(slug, date)
                 
                 for prog_data in syn_programmes:
+                    # Check if we have programmes for this channel
                     has_programmes = True
                     # Map syn.is channel slug to our channel structure (normalize and apply mappings)
                     channel_slug = normalize_channel_slug(prog_data.get("midill", slug), "syn")
@@ -300,6 +307,7 @@ def fetch_syn_epg(slug: str, date: str) -> List[Dict[str, Any]]:
     """Fetch EPG data for a specific channel and date from syn.is API."""
     try:
         url = f"{SYN_API_URL}/{slug}/{date}"
+        logger.info("Fetching syn.is EPG : %s", url)
         response = requests.get(url, timeout=30)
         response.raise_for_status()
         return response.json()
