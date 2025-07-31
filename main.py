@@ -65,6 +65,26 @@ def get_epg_url(comp_data: Dict[str, Any]) -> str | None:
     return None
 
 
+def normalize_channel_slug(slug: str, source: str = "") -> str:
+    """Normalize channel slugs for consistent matching between sources."""
+    # Remove hyphens and convert to lowercase
+    normalized = slug.lower().replace("-", "")
+    
+    # Handle specific channel mappings
+    channel_mappings = {
+        # syn.is -> redbee mappings
+        "synsport": "synsport1",
+        # Add more mappings here as needed
+        # "syn_channel": "redbee_channel",
+    }
+    
+    # Apply mappings if this is from syn.is source
+    if source == "syn" and normalized in channel_mappings:
+        normalized = channel_mappings[normalized]
+    
+    return normalized
+
+
 def build_epg() -> str:
     """Build XMLTV from Redbee API and syn.is API (merged data)."""
 
@@ -82,7 +102,7 @@ def build_epg() -> str:
 
         for ch in outer.get("channels", []):
             ch_info = ch["channel"]
-            slug = ch_info["slugs"][0].replace("-", "")  # Remove hyphens for better matching
+            slug = normalize_channel_slug(ch_info["slugs"][0], "redbee")
             title = ch_info["title"]
 
             # Store channel info
@@ -131,8 +151,8 @@ def build_epg() -> str:
             dates_to_fetch.append(date)
 
         for slug in syn_channels:
-            # Normalize the slug by removing hyphens
-            normalized_slug = slug.lower().replace("-", "")
+            # Normalize the slug by removing hyphens and applying mappings
+            normalized_slug = normalize_channel_slug(slug, "syn")
             
             # Ensure channel exists even if no programmes are found
             if normalized_slug not in channels_data:
@@ -149,8 +169,8 @@ def build_epg() -> str:
                 
                 for prog_data in syn_programmes:
                     has_programmes = True
-                    # Map syn.is channel slug to our channel structure (normalize by removing hyphens)
-                    channel_slug = prog_data.get("midill", slug).lower().replace("-", "")
+                    # Map syn.is channel slug to our channel structure (normalize and apply mappings)
+                    channel_slug = normalize_channel_slug(prog_data.get("midill", slug), "syn")
                     
                     # Update channel title if we have better information
                     if prog_data.get("midill_heiti"):
